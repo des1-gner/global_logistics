@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Global Metro - 3D Transport Game</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="game-container">
+        <div id="loading">Loading world data...</div>
+
+        <div id="hud">
+            <div id="score-panel">
+                <h1>🌐 Global Metro</h1>
+                <div class="score-row"><span>Score</span><span id="score-val">0</span></div>
+                <div class="score-row"><span>Delivered</span><span id="delivered-val">0</span></div>
+                <div class="score-row"><span>Cities</span><span id="cities-val">0</span></div>
+                <div class="score-row"><span>Week</span><span id="week-val">1</span></div>
+                <div class="score-row money-row"><span>💰 Money</span><span id="money-val">$200</span></div>
+            </div>
+        </div>
+
+        <div id="transport-bar">
+            <button class="transport-btn active" data-type="train">
+                🚂 Train <span class="transport-cost">$50</span> <span class="key">1</span>
+            </button>
+            <button class="transport-btn" data-type="plane">
+                ✈️ Plane <span class="transport-cost">$150</span> <span class="key">2</span>
+            </button>
+            <button class="transport-btn" data-type="boat">
+                🚢 Boat <span class="transport-cost">$80</span> <span class="key">3</span>
+            </button>
+            <button class="transport-btn" data-type="delete">
+                🗑️ Remove <span class="transport-cost">+50%</span> <span class="key">X</span>
+            </button>
+        </div>
+
+        <div id="controls-hint">Drag to rotate · Scroll to zoom · Click two cities to connect · 1/2/3/X to switch tools</div>
+
+        <div id="tooltip">
+            <div class="tooltip-name"></div>
+            <div class="tooltip-info"></div>
+            <div class="tooltip-passengers"></div>
+        </div>
+
+        <div id="overlay">
+            <h1>🌐 Global Metro</h1>
+            <p>Build a worldwide transport network! Cities appear over time with passengers wanting to reach other regions. Earn money by delivering passengers, spend it to build connections.</p>
+            <p class="rules">
+                🚂 Train $50 — click cities in sequence to draw a line<br>
+                ✈️ Plane $150 — click two cities to fly anywhere<br>
+                🚢 Boat $80 — click cities in sequence for sea routes<br>
+                💰 Earn $30 per delivery (+$20 cross-continent bonus)<br>
+                🗑️ Remove connections for 50% refund<br>
+                ⚠️ Max 6 passengers per city — overflow = game over!
+            </p>
+            <button id="start-btn">Start Game</button>
+        </div>
+
+        <div id="game-over-overlay" style="display:none;">
+            <h1>Game Over</h1>
+            <p id="game-over-reason"></p>
+            <div id="game-over-stats"></div>
+            <button id="restart-btn">Play Again</button>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+
+    <script src="js/data/cities.js"></script>
+    <script src="js/data/regions.js"></script>
+    <script src="js/engine/terrain.js"></script>
+    <script src="js/engine/globe.js"></script>
+    <script src="js/engine/renderer.js"></script>
+    <script src="js/game/state.js"></script>
+    <script src="js/game/connections.js"></script>
+    <script src="js/game/passengers.js"></script>
+    <script src="js/game/spawner.js"></script>
+    <script src="js/ui/hud.js"></script>
+    <script src="js/ui/controls.js"></script>
+    <script src="js/ui/tooltip.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>
