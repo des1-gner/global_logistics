@@ -1,1 +1,1 @@
-![GAME](/test.png)
+![preview](test.jpg)
