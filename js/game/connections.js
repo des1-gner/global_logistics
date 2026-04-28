@@ -1,182 +1,241 @@
 /**
- * Connection management — terrain-aware paths.
- * Trains: follow great circle on land surface, bridge segments over water (yellow + pillars).
- * Boats: follow great circle on water surface, slightly raised.
- * Planes: high arc, simple.
- * No connection limits — any two cities can be connected.
+ * Connection management — uses globe.gl arcsData for planes,
+ * pathsData for trains/boats. Terrain validation enforced:
+ * Trains: max ~6 consecutive water tiles (short crossings like English Channel ok).
+ * Boats: max ~4 consecutive land tiles (short port approaches ok).
+ * Players can use the draw feature to route around obstacles.
  */
 const Connections = (function () {
-    const R = GlobeEngine.GLOBE_RADIUS;
 
-    const COLORS = {
-        trainLand:  0x4ade80,
-        bridge:     0xfbbf24,
-        boatWater:  0x38bdf8,
-        boatLand:   0xf87171,  // shouldn't happen much
-        plane:      0x60a5fa,
-    };
+    var TRAIN_MAX_WATER = 4;
+    var BOAT_MAX_LAND = 3;
 
     function canConnect(fromCity, toCity, type) {
-        const st = GameState.get();
-        const cost = GameState.TRANSPORT_COSTS[type];
-        if (st.money < cost) return { ok: false, reason: 'Need $' + cost };
-        // No other restrictions — any two cities, duplicates allowed
-        return { ok: true };
+        var cost = GameState.getBuildCost(type, fromCity, toCity);
+        if (!GameState.canAfford(cost)) {
+            return { ok: false, reason: 'Need $' + cost.money + ' \uD83D\uDD29' + cost.steel + ' \u26FD' + cost.fuel };
+        }
+        return { ok: true, cost: cost };
     }
 
     /**
-     * Generate path points between two cities as a great-circle interpolation.
-     * Each point is tagged with terrain type.
+     * Check terrain along a route. Returns { ok } or { ok, reason }.
      */
-    function generatePathPoints(fromData, toData, type, steps) {
-        steps = steps || 60;
-        const points = [];
-
-        // Handle date-line wrapping
-        let dLon = toData.lon - fromData.lon;
-        if (dLon > 180) dLon -= 360;
-        if (dLon < -180) dLon += 360;
-
-        for (let i = 0; i <= steps; i++) {
-            const t = i / steps;
-            const lat = fromData.lat + (toData.lat - fromData.lat) * t;
-            let lon = fromData.lon + dLon * t;
-            if (lon > 180) lon -= 360;
-            if (lon < -180) lon += 360;
-
-            const onLand = Terrain.isReady() ? Terrain.isLand(lat, lon) : true;
-
-            let terrain, height;
-            if (type === 'train') {
-                terrain = onLand ? 'land' : 'bridge';
-                height = onLand ? R * 1.003 : R * 1.015;
-            } else if (type === 'boat') {
-                terrain = onLand ? 'land' : 'water';
-                height = onLand ? R * 1.003 : R * 1.002;
-            } else {
-                terrain = 'air';
-                height = R * 1.003; // will be overridden
-            }
-
-            points.push({ lat, lon, terrain, height });
+    function validateTerrain(waypoints, type) {
+        if (type === 'plane') return { ok: true };
+        
+        // If terrain hasn't loaded yet, block non-plane routes
+        if (!Terrain.isReady()) {
+            return { ok: false, reason: 'Terrain data still loading... try again in a moment.' };
         }
 
-        return points;
-    }
+        var consecutive = 0;
+        var maxConsecutive = 0;
 
-    function buildConnectionMesh(fromCity, toCity, type) {
-        const from = fromCity.data, to = toCity.data;
-        const group = new THREE.Group();
+        for (var w = 0; w < waypoints.length - 1; w++) {
+            var from = waypoints[w];
+            var to = waypoints[w + 1];
+            var dLng = to.lng - from.lng;
+            if (dLng > 180) dLng -= 360;
+            if (dLng < -180) dLng += 360;
 
-        // Planes: simple high arc
-        if (type === 'plane') {
-            const start = GlobeEngine.latLonToVec3(from.lat, from.lon, R * 1.004);
-            const end = GlobeEngine.latLonToVec3(to.lat, to.lon, R * 1.004);
-            const mid = new THREE.Vector3().addVectors(start, end).multiplyScalar(0.5);
-            const dist = start.distanceTo(end);
-            mid.normalize().multiplyScalar(R + 0.3 * dist);
+            var steps = Math.max(10, Math.ceil(60 * (Math.abs(to.lat - from.lat) + Math.abs(dLng)) / 180));
 
-            const curve = new THREE.QuadraticBezierCurve3(start, mid, end);
-            const pts = curve.getPoints(60);
-            group.add(new THREE.Line(
-                new THREE.BufferGeometry().setFromPoints(pts),
-                new THREE.LineBasicMaterial({ color: COLORS.plane, transparent: true, opacity: 0.5 })
-            ));
-            group.userData.curve = curve;
-            return group;
-        }
+            for (var i = 0; i <= steps; i++) {
+                var t = i / steps;
+                var lat = from.lat + (to.lat - from.lat) * t;
+                var lng = from.lng + dLng * t;
+                if (lng > 180) lng -= 360;
+                if (lng < -180) lng += 360;
 
-        // Trains / Boats: terrain-aware segmented path
-        const pathPoints = generatePathPoints(from, to, type);
-        const allVec3 = pathPoints.map(p => GlobeEngine.latLonToVec3(p.lat, p.lon, p.height));
+                var onLand = Terrain.isLand(lat, lng);
 
-        // Draw segments colored by terrain
-        let segStart = 0;
-        let currentTerrain = pathPoints[0].terrain;
-
-        for (let i = 1; i <= pathPoints.length; i++) {
-            const nextTerrain = i < pathPoints.length ? pathPoints[i].terrain : null;
-
-            if (nextTerrain !== currentTerrain || i === pathPoints.length) {
-                const segPts = allVec3.slice(segStart, Math.min(i + 1, allVec3.length));
-                if (segPts.length >= 2) {
-                    let color;
-                    if (type === 'train') {
-                        color = currentTerrain === 'bridge' ? COLORS.bridge : COLORS.trainLand;
-                    } else {
-                        color = currentTerrain === 'water' ? COLORS.boatWater : COLORS.boatLand;
-                    }
-
-                    const mat = new THREE.LineBasicMaterial({
-                        color, transparent: true,
-                        opacity: currentTerrain === 'bridge' ? 0.7 : 0.55,
-                    });
-                    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(segPts), mat));
-
-                    // Bridge pillars for train water crossings
-                    if (type === 'train' && currentTerrain === 'bridge' && segPts.length >= 2) {
-                        const pillarMat = new THREE.LineBasicMaterial({ color: COLORS.bridge, transparent: true, opacity: 0.35 });
-                        const pillarIndices = [0, Math.floor(segPts.length / 2), segPts.length - 1];
-                        for (const pi of pillarIndices) {
-                            if (pi >= segPts.length) continue;
-                            const top = segPts[pi];
-                            const bottom = top.clone().normalize().multiplyScalar(R * 1.001);
-                            group.add(new THREE.Line(
-                                new THREE.BufferGeometry().setFromPoints([bottom, top]), pillarMat
-                            ));
-                        }
-                    }
+                if (type === 'train' && !onLand) {
+                    consecutive++;
+                } else if (type === 'boat' && onLand) {
+                    consecutive++;
+                } else {
+                    consecutive = 0;
                 }
-                segStart = Math.max(0, i - 1);
-                if (nextTerrain) currentTerrain = nextTerrain;
+                if (consecutive > maxConsecutive) maxConsecutive = consecutive;
             }
         }
 
-        // Smooth curve for traveler animation
-        const curve = new THREE.CatmullRomCurve3(allVec3, false, 'centripetal', 0.3);
-        group.userData.curve = curve;
-        return group;
+        if (type === 'train' && maxConsecutive > TRAIN_MAX_WATER) {
+            return { ok: false, reason: 'Train route crosses too much water! Draw around the coast or use a boat.' };
+        }
+        if (type === 'boat' && maxConsecutive > BOAT_MAX_LAND) {
+            return { ok: false, reason: 'Boat route crosses too much land! Draw along the coast or use a train.' };
+        }
+        return { ok: true };
     }
 
     function connect(fromCity, toCity, type) {
-        const check = canConnect(fromCity, toCity, type);
+        if (type !== 'plane') {
+            return connectWithWaypoints(fromCity, toCity, type, [
+                { lat: fromCity.data.lat, lng: fromCity.data.lng },
+                { lat: toCity.data.lat, lng: toCity.data.lng },
+            ]);
+        }
+        var check = canConnect(fromCity, toCity, type);
         if (!check.ok) return check;
 
-        const conn = GameState.addConnection(fromCity, toCity, type);
-        const meshGroup = buildConnectionMesh(fromCity, toCity, type);
-        conn.mesh = meshGroup;
-        GlobeEngine.getArcGroup().add(meshGroup);
+        var conn = GameState.addConnection(fromCity, toCity, type);
+        conn.waypoints = null;
+        Passengers.spawnVehicle(conn);
+        refreshGlobeData();
+        return { ok: true, connection: conn };
+    }
 
+    function connectWithWaypoints(fromCity, toCity, type, waypoints) {
+        // Terrain check first (before spending resources)
+        var terrainCheck = validateTerrain(waypoints, type);
+        if (!terrainCheck.ok) return terrainCheck;
+
+        var check = canConnect(fromCity, toCity, type);
+        if (!check.ok) return check;
+
+        var conn = GameState.addConnection(fromCity, toCity, type);
+        conn.waypoints = waypoints.map(function(w) { return { lat: w.lat, lng: w.lng }; });
+        Passengers.spawnVehicle(conn);
+        refreshGlobeData();
         return { ok: true, connection: conn };
     }
 
     function disconnect(connId) {
-        const conn = GameState.removeConnection(connId);
+        // Remove vehicles first (drops passengers back at cities)
+        Passengers.removeVehiclesForConnection(connId);
+
+        var conn = GameState.removeConnection(connId);
         if (!conn) return;
 
-        if (conn.mesh) {
-            GlobeEngine.getArcGroup().remove(conn.mesh);
-            conn.mesh.traverse(child => {
-                if (child.geometry) child.geometry.dispose();
-                if (child.material) child.material.dispose();
-            });
-        }
-
-        const st = GameState.get();
-        const toRemove = st.travelers.filter(t => t.connection.id === connId);
-        toRemove.forEach(t => {
-            GlobeEngine.getPassengerGroup().remove(t.mesh);
-            if (t.mesh.geometry) t.mesh.geometry.dispose();
-            if (t.mesh.material) t.mesh.material.dispose();
-        });
-        st.travelers = st.travelers.filter(t => t.connection.id !== connId);
-
+        refreshGlobeData();
         return conn;
     }
 
-    function getArcCurve(conn) {
-        return conn.mesh?.userData?.curve || null;
+    function refreshGlobeData() {
+        var st = GameState.get();
+        var arcs = [];
+        var paths = [];
+
+        st.connections.forEach(function(conn) {
+            if (conn.type === 'plane') {
+                arcs.push({
+                    __connId: conn.id,
+                    startLat: conn.from.data.lat,
+                    startLng: conn.from.data.lng,
+                    endLat: conn.to.data.lat,
+                    endLng: conn.to.data.lng,
+                    color: ['rgba(255,255,255,0.8)', 'rgba(255,255,255,0.4)'],
+                });
+            } else {
+                var wps = conn.waypoints || [
+                    { lat: conn.from.data.lat, lng: conn.from.data.lng },
+                    { lat: conn.to.data.lat, lng: conn.to.data.lng },
+                ];
+
+                var pathPoints = [];
+                for (var w = 0; w < wps.length - 1; w++) {
+                    var from = wps[w];
+                    var to = wps[w + 1];
+                    var steps = 30;
+                    var dLng = to.lng - from.lng;
+                    if (dLng > 180) dLng -= 360;
+                    if (dLng < -180) dLng += 360;
+
+                    for (var i = 0; i <= steps; i++) {
+                        if (w > 0 && i === 0) continue;
+                        var t = i / steps;
+                        var lat = from.lat + (to.lat - from.lat) * t;
+                        var lng = from.lng + dLng * t;
+                        if (lng > 180) lng -= 360;
+                        if (lng < -180) lng += 360;
+                        var alt = conn.type === 'train' ? 0.006 : 0.004;
+                        pathPoints.push([lat, lng, alt]);
+                    }
+                }
+
+                var color;
+                if (conn.type === 'train') {
+                    color = ['rgba(40,40,40,0.9)'];
+                } else {
+                    color = ['rgba(220,60,60,0.8)'];
+                }
+
+                paths.push({
+                    __connId: conn.id,
+                    points: pathPoints,
+                    color: color,
+                });
+            }
+        });
+
+        GlobeEngine.updateArcs(arcs);
+        GlobeEngine.updatePaths(paths);
     }
 
-    return { canConnect, connect, disconnect, getArcCurve };
+    function getPositionAlongConnection(conn, t) {
+        t = Math.max(0, Math.min(1, t));
+
+        if (conn.type === 'plane') {
+            var lat = conn.from.data.lat + (conn.to.data.lat - conn.from.data.lat) * t;
+            var dLng = conn.to.data.lng - conn.from.data.lng;
+            if (dLng > 180) dLng -= 360;
+            if (dLng < -180) dLng += 360;
+            var lng = conn.from.data.lng + dLng * t;
+            if (lng > 180) lng -= 360;
+            if (lng < -180) lng += 360;
+            var dist = Math.sqrt(Math.pow(conn.to.data.lat - conn.from.data.lat, 2) + Math.pow(dLng, 2));
+            var alt = 0.02 + Math.sin(t * Math.PI) * dist * 0.003;
+            return { lat: lat, lng: lng, alt: alt };
+        }
+
+        var wps = conn.waypoints || [
+            { lat: conn.from.data.lat, lng: conn.from.data.lng },
+            { lat: conn.to.data.lat, lng: conn.to.data.lng },
+        ];
+
+        var totalDist = 0;
+        for (var i = 1; i < wps.length; i++) {
+            var dL = wps[i].lng - wps[i-1].lng;
+            if (dL > 180) dL -= 360;
+            if (dL < -180) dL += 360;
+            totalDist += Math.sqrt(Math.pow(wps[i].lat - wps[i-1].lat, 2) + Math.pow(dL, 2));
+        }
+
+        var targetDist = totalDist * t;
+        var accumulated = 0;
+
+        for (var j = 1; j < wps.length; j++) {
+            var prev = wps[j - 1];
+            var curr = wps[j];
+            var dLn = curr.lng - prev.lng;
+            if (dLn > 180) dLn -= 360;
+            if (dLn < -180) dLn += 360;
+            var segDist = Math.sqrt(Math.pow(curr.lat - prev.lat, 2) + Math.pow(dLn, 2));
+
+            if (accumulated + segDist >= targetDist || j === wps.length - 1) {
+                var segT = segDist > 0 ? (targetDist - accumulated) / segDist : 0;
+                var rLat = prev.lat + (curr.lat - prev.lat) * Math.min(1, segT);
+                var rLng = prev.lng + dLn * Math.min(1, segT);
+                if (rLng > 180) rLng -= 360;
+                if (rLng < -180) rLng += 360;
+                var rAlt = conn.type === 'train' ? 0.008 : 0.006;
+                return { lat: rLat, lng: rLng, alt: rAlt };
+            }
+            accumulated += segDist;
+        }
+
+        var last = wps[wps.length - 1];
+        return { lat: last.lat, lng: last.lng, alt: 0.008 };
+    }
+
+    return {
+        canConnect: canConnect,
+        connect: connect,
+        connectWithWaypoints: connectWithWaypoints,
+        disconnect: disconnect,
+        getPositionAlongConnection: getPositionAlongConnection,
+        refreshGlobeData: refreshGlobeData,
+    };
 })();

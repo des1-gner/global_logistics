@@ -8,6 +8,7 @@
 </head>
 <body>
     <div id="game-container">
+        <div id="globe-container"></div>
         <div id="loading">Loading world data...</div>
 
         <div id="hud">
@@ -17,42 +18,60 @@
                 <div class="score-row"><span>Delivered</span><span id="delivered-val">0</span></div>
                 <div class="score-row"><span>Cities</span><span id="cities-val">0</span></div>
                 <div class="score-row"><span>Week</span><span id="week-val">1</span></div>
-                <div class="score-row money-row"><span>💰 Money</span><span id="money-val">$200</span></div>
+                <div class="divider"></div>
+                <div class="score-row money-row"><span>💰 Money</span><span id="money-val">$1800</span></div>
+                <div class="score-row"><span>🔩 Steel</span><span id="steel-val">150</span></div>
+                <div class="score-row"><span>⛽ Fuel</span><span id="fuel-val">120</span></div>
+                <div class="divider"></div>
+                <div class="score-row maint-row"><span>Upkeep</span><span id="maintenance-val">-$0/wk</span></div>
+            </div>
+
+            <div id="speed-panel">
+                <button class="sound-toggle" id="sound-toggle" title="Toggle sound">🔊</button>
+                <span class="speed-label">Speed</span>
+                <button class="speed-btn" data-speed="slow">▶</button>
+                <button class="speed-btn active" data-speed="normal">▶▶</button>
+                <button class="speed-btn" data-speed="fast">▶▶▶</button>
             </div>
         </div>
 
         <div id="transport-bar">
             <button class="transport-btn active" data-type="train">
-                🚂 Train <span class="transport-cost">$50</span> <span class="key">1</span>
+                🚂 Train <span class="transport-cost">$35+🔩20</span> <span class="key">1</span>
             </button>
             <button class="transport-btn" data-type="plane">
-                ✈️ Plane <span class="transport-cost">$150</span> <span class="key">2</span>
+                ✈️ Plane <span class="transport-cost">$150+⛽15</span> <span class="key">2</span>
             </button>
             <button class="transport-btn" data-type="boat">
-                🚢 Boat <span class="transport-cost">$80</span> <span class="key">3</span>
+                🚢 Boat <span class="transport-cost">$50+🔩12+⛽12</span> <span class="key">3</span>
             </button>
             <button class="transport-btn" data-type="delete">
-                🗑️ Remove <span class="transport-cost">+50%</span> <span class="key">X</span>
+                🗑️ Remove <span class="transport-cost">40% back</span> <span class="key">X</span>
             </button>
         </div>
 
-        <div id="controls-hint">Drag to rotate · Scroll to zoom · Click two cities to connect · 1/2/3/X to switch tools</div>
+        <div id="controls-hint">Right-drag to rotate · Scroll to zoom · Left-click to draw routes · 1/2/3/X to switch · Esc to cancel</div>
 
         <div id="tooltip">
             <div class="tooltip-name"></div>
             <div class="tooltip-info"></div>
+            <div class="tooltip-infra"></div>
+            <div class="tooltip-cost"></div>
             <div class="tooltip-passengers"></div>
         </div>
 
         <div id="overlay">
             <h1>🌐 Global Metro</h1>
-            <p>Build a worldwide transport network! Cities appear over time with passengers wanting to reach other regions. Earn money by delivering passengers, spend it to build connections.</p>
+            <p>Build a worldwide transport network! Cities appear over time — passengers want to reach other regions. Earn resources by delivering passengers, spend them to build and maintain connections.</p>
             <p class="rules">
-                🚂 Train $50 — click cities in sequence to draw a line<br>
-                ✈️ Plane $150 — click two cities to fly anywhere<br>
-                🚢 Boat $80 — click cities in sequence for sea routes<br>
-                💰 Earn $30 per delivery (+$20 cross-continent bonus)<br>
-                🗑️ Remove connections for 50% refund<br>
+                🚂 Train — stays on land, draw waypoints to route around water<br>
+                ✈️ Plane — click two cities to fly direct anywhere<br>
+                🚢 Boat — stays on water, draw waypoints to route around land<br>
+                🖱️ Right-drag to rotate · Scroll to zoom · Left-click to build<br>
+                🌊 Short crossings (channels, ports) are allowed<br>
+                💰 Money + 🔩 Steel + ⛽ Fuel — manage all three<br>
+                🏗️ Red countries = poor infra = higher costs<br>
+                📦 Each connection costs upkeep per week — be strategic!<br>
                 ⚠️ Max 6 passengers per city — overflow = game over!
             </p>
             <button id="start-btn">Start Game</button>
@@ -67,6 +86,7 @@
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/globe.gl@2.27.2"></script>
     <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
 
     <script src="js/data/cities.js"></script>
@@ -74,6 +94,7 @@
     <script src="js/engine/terrain.js"></script>
     <script src="js/engine/globe.js"></script>
     <script src="js/engine/renderer.js"></script>
+    <script src="js/engine/sound.js"></script>
     <script src="js/game/state.js"></script>
     <script src="js/game/connections.js"></script>
     <script src="js/game/passengers.js"></script>

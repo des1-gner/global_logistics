@@ -1,98 +1,69 @@
 /**
- * Input controls — mouse drag, zoom, keyboard, tool selection.
- * Planes: click city A, click city B → connect.
- * Trains/Boats: click cities in sequence to draw a line (polyline mode).
- *   Double-click or press Enter/Escape to finish the line.
- *   Each consecutive pair in the polyline becomes a connection.
- * Delete: click city A, click city B → remove connection between them.
+ * Input controls — uses globe.gl native click/hover handlers.
+ * Left-click on cities to start/finish routes.
+ * Left-click on globe surface to place waypoints for train/boat routes.
+ * Planes are direct arcs. Keyboard shortcuts for tool selection.
  */
 const Controls = (function () {
-    let isDragging = false;
-    let previousMouse = { x: 0, y: 0 };
-    let rotationVelocity = { x: 0, y: 0 };
-    let targetRotation = { x: 0.5, y: -0.3 };
-    let dragDistance = 0;
     let hoveredCity = null;
 
-    // Polyline drawing state for trains/boats
-    let polylineCities = [];  // cities clicked in sequence
+    // Route drawing state for trains/boats
+    let drawingRoute = false;
+    let drawStartCity = null;
+    let drawWaypoints = [];
+    let drawPreviewMeshes = [];
 
     function init() {
-        const canvas = GlobeEngine.getRenderer().domElement;
+        const globe = GlobeEngine.getGlobe();
+        if (!globe) { console.warn('Globe not ready for controls'); return; }
 
-        canvas.addEventListener('mousedown', e => {
-            isDragging = true;
-            dragDistance = 0;
-            previousMouse = { x: e.clientX, y: e.clientY };
+        // Prevent context menu on right-click (so right-drag rotation works)
+        document.getElementById('globe-container').addEventListener('contextmenu', function(e) { e.preventDefault(); });
+
+        // City click handler (via objectsData)
+        globe.onObjectClick((obj, event) => {
+            const st = GameState.get();
+            if (!st.running) return;
+            const city = st.activeCities.find(c => c.id === obj.__cityId);
+            if (!city) return;
+            handleCityClick(city, event);
         });
 
-        canvas.addEventListener('mousemove', e => {
+        // Globe surface click handler (for waypoints on ocean)
+        globe.onGlobeClick(({ lat, lng }, event) => {
+            const st = GameState.get();
+            if (!st.running) return;
+            handleGlobeClick(lat, lng, event);
+        });
+
+        // City hover handler
+        globe.onObjectHover((obj, prevObj) => {
             const st = GameState.get();
             if (!st.running) return;
 
-            if (isDragging) {
-                const dx = e.clientX - previousMouse.x;
-                const dy = e.clientY - previousMouse.y;
-                dragDistance += Math.abs(dx) + Math.abs(dy);
-                targetRotation.y += dx * 0.005;
-                targetRotation.x += dy * 0.005;
-                targetRotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, targetRotation.x));
-                rotationVelocity = { x: dy * 0.005, y: dx * 0.005 };
-                previousMouse = { x: e.clientX, y: e.clientY };
-                Tooltip.hide();
-            } else {
-                const city = Picker.getIntersectedCity(e, GlobeEngine.getCamera(), GlobeEngine.getMarkerGroup(), st.activeCities);
+            if (obj) {
+                const city = st.activeCities.find(c => c.id === obj.__cityId);
                 if (city) {
-                    Tooltip.show(city, e.clientX, e.clientY);
-                    canvas.style.cursor = 'pointer';
-                    if (hoveredCity && hoveredCity.id !== city.id) highlightCity(hoveredCity, false);
-                    highlightCity(city, true);
+                    // Get mouse position from the last known event
+                    const container = document.getElementById('globe-container');
+                    const rect = container.getBoundingClientRect();
+                    // Use globe's internal mouse tracking
+                    Tooltip.show(city, lastMouseX, lastMouseY);
                     hoveredCity = city;
-                } else {
-                    Tooltip.hide();
-                    canvas.style.cursor = 'grab';
-                    if (hoveredCity) highlightCity(hoveredCity, false);
-                    hoveredCity = null;
                 }
+            } else {
+                Tooltip.hide();
+                hoveredCity = null;
             }
         });
 
-        canvas.addEventListener('mouseup', e => {
-            const wasDrag = dragDistance > 5;
-            isDragging = false;
-            if (!wasDrag) handleClick(e);
-        });
-
-        canvas.addEventListener('mouseleave', () => {
-            isDragging = false;
-            Tooltip.hide();
-        });
-
-        // Touch
-        canvas.addEventListener('touchstart', e => {
-            isDragging = true; dragDistance = 0;
-            previousMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-        });
-        canvas.addEventListener('touchmove', e => {
-            if (!isDragging) return; e.preventDefault();
-            const dx = e.touches[0].clientX - previousMouse.x;
-            const dy = e.touches[0].clientY - previousMouse.y;
-            dragDistance += Math.abs(dx) + Math.abs(dy);
-            targetRotation.y += dx * 0.005;
-            targetRotation.x += dy * 0.005;
-            targetRotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, targetRotation.x));
-            previousMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-        }, { passive: false });
-        canvas.addEventListener('touchend', e => {
-            const wasDrag = dragDistance > 10;
-            isDragging = false;
-            if (!wasDrag && e.changedTouches.length > 0) handleClick(e.changedTouches[0]);
-        });
-
-        // Zoom
-        canvas.addEventListener('wheel', e => {
-            const cam = GlobeEngine.getCamera();
-            cam.position.z = Math.max(1.5, Math.min(8, cam.position.z + e.deltaY * 0.002));
+        // Track mouse position for tooltip
+        document.getElementById('globe-container').addEventListener('mousemove', e => {
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+            if (hoveredCity) {
+                Tooltip.show(hoveredCity, e.clientX, e.clientY);
+            }
         });
 
         // Keyboard
@@ -105,8 +76,7 @@ const Controls = (function () {
                 case '3': selectTool('boat'); break;
                 case 'x': case 'X': selectTool('delete'); break;
                 case 'Escape':
-                case 'Enter':
-                    finishPolyline();
+                    cancelDrawing();
                     break;
             }
         });
@@ -117,10 +87,11 @@ const Controls = (function () {
         });
     }
 
+    let lastMouseX = 0, lastMouseY = 0;
+
     function selectTool(type) {
         const st = GameState.get();
-        // Finish any in-progress polyline before switching
-        finishPolyline();
+        cancelDrawing();
         st.selectedTool = type;
         st.pendingConnection = null;
 
@@ -134,27 +105,27 @@ const Controls = (function () {
     function updateHint() {
         const st = GameState.get();
         const hint = document.getElementById('controls-hint');
-        if (st.selectedTool === 'train' || st.selectedTool === 'boat') {
-            hint.textContent = 'Click cities in sequence to draw a line · Press Esc/Enter to finish · 1/2/3/X to switch';
+        if (st.selectedTool === 'train') {
+            if (drawingRoute) {
+                hint.textContent = 'Click globe to add waypoints \u00B7 Click a city to finish \u00B7 Esc to cancel';
+            } else {
+                hint.textContent = 'Click a city to start \u00B7 Draw waypoints to route around water \u00B7 Right-drag to rotate';
+            }
+        } else if (st.selectedTool === 'boat') {
+            if (drawingRoute) {
+                hint.textContent = 'Click globe to add waypoints \u00B7 Click a city to finish \u00B7 Esc to cancel';
+            } else {
+                hint.textContent = 'Click a city to start \u00B7 Draw waypoints to route around land \u00B7 Right-drag to rotate';
+            }
         } else if (st.selectedTool === 'delete') {
-            hint.textContent = 'Click two connected cities to remove the connection · 1/2/3/X to switch';
+            hint.textContent = 'Click two connected cities to remove the connection \u00B7 1/2/3/X to switch';
         } else {
-            hint.textContent = 'Click two cities to connect with a plane · 1/2/3/X to switch';
+            hint.textContent = 'Click two cities to connect with a plane \u00B7 Right-drag to rotate \u00B7 Scroll to zoom';
         }
     }
 
-    function handleClick(e) {
+    function handleCityClick(city, event) {
         const st = GameState.get();
-        if (!st.running) return;
-
-        const city = Picker.getIntersectedCity(e, GlobeEngine.getCamera(), GlobeEngine.getMarkerGroup(), st.activeCities);
-        if (!city) {
-            // Clicked empty space — finish polyline if drawing
-            if (polylineCities.length > 0) finishPolyline();
-            st.pendingConnection = null;
-            return;
-        }
-
         const tool = st.selectedTool;
 
         if (tool === 'delete') {
@@ -167,78 +138,201 @@ const Controls = (function () {
             return;
         }
 
-        // Train or Boat: polyline mode
-        handlePolylineClick(city, st, tool);
+        // Train or Boat: route drawing mode
+        handleRouteDrawCityClick(city, st, tool);
+    }
+
+    function handleGlobeClick(lat, lng, event) {
+        const st = GameState.get();
+        const tool = st.selectedTool;
+
+        if (tool === 'plane' || tool === 'delete') {
+            // Clicked empty space — deselect pending
+            if (st.pendingConnection) {
+                st.pendingConnection = null;
+            }
+            return;
+        }
+
+        // Train or Boat: add waypoint if drawing
+        if (tool === 'train' || tool === 'boat') {
+            if (drawingRoute) {
+                drawWaypoints.push({ lat, lng });
+                Sound.waypoint();
+                updateDrawPreview(tool);
+            }
+        }
+    }
+
+    /**
+     * Handle waypoint placement from polygon clicks (countries).
+     * Called from globe.js onPolygonClick when drawing a route.
+     */
+    function handleWaypointClick(lat, lng) {
+        var st = GameState.get();
+        if (!st.running) return;
+        var tool = st.selectedTool;
+        if (tool === 'train' || tool === 'boat') {
+            if (drawingRoute) {
+                drawWaypoints.push({ lat: lat, lng: lng });
+                Sound.waypoint();
+                updateDrawPreview(tool);
+            }
+        }
     }
 
     function handlePlaneClick(city, st) {
         if (!st.pendingConnection) {
             st.pendingConnection = { fromCity: city };
-            highlightCity(city, true);
+            Sound.click();
         } else {
             if (st.pendingConnection.fromCity.id !== city.id) {
                 const result = Connections.connect(st.pendingConnection.fromCity, city, 'plane');
-                if (!result.ok) console.log('Cannot connect:', result.reason);
+                if (!result.ok) {
+                    document.getElementById('controls-hint').textContent = '\u26A0 ' + result.reason;
+                    Sound.error();
+                } else {
+                    Sound.planeWhoosh();
+                }
             }
             st.pendingConnection = null;
         }
     }
 
-    function handlePolylineClick(city, st, tool) {
-        // Don't add the same city twice in a row
-        if (polylineCities.length > 0 && polylineCities[polylineCities.length - 1].id === city.id) return;
-
-        // If we have a previous city, connect it to this one
-        if (polylineCities.length > 0) {
-            const prevCity = polylineCities[polylineCities.length - 1];
-            const result = Connections.connect(prevCity, city, tool);
-            if (!result.ok) {
-                console.log('Cannot connect:', result.reason);
-                return; // Don't add to polyline if connection failed
-            }
+    function handleRouteDrawCityClick(city, st, tool) {
+        if (!drawingRoute) {
+            // Start drawing
+            drawingRoute = true;
+            drawStartCity = city;
+            drawWaypoints = [{ lat: city.data.lat, lng: city.data.lng }];
+            Sound.drawStart();
+            updateHint();
+            return;
         }
 
-        polylineCities.push(city);
-        highlightCity(city, true);
+        // Already drawing — clicked a city to finish
+        if (city.id === drawStartCity.id) return;
+
+        drawWaypoints.push({ lat: city.data.lat, lng: city.data.lng });
+
+        const result = Connections.connectWithWaypoints(drawStartCity, city, tool, drawWaypoints);
+        if (!result.ok) {
+            document.getElementById('controls-hint').textContent = '\u26A0 ' + result.reason;
+            Sound.error();
+        } else {
+            Sound.buildComplete();
+            if (tool === 'train') Sound.trainHorn();
+            else if (tool === 'boat') Sound.boatHorn();
+        }
+
+        finishDrawing();
     }
 
-    function finishPolyline() {
-        // Clear highlights
-        polylineCities.forEach(c => highlightCity(c, false));
-        polylineCities = [];
+    function updateDrawPreview(tool) {
+        clearDrawPreview();
+
+        if (drawWaypoints.length < 2) return;
+
+        const globe = GlobeEngine.getGlobe();
+        const previewGroup = GlobeEngine.getPreviewGroup();
+        const color = tool === 'train' ? 0x4ade80 : 0x38bdf8;
+
+        // Build preview line through all waypoints
+        const points = [];
+        for (let i = 0; i < drawWaypoints.length - 1; i++) {
+            const from = drawWaypoints[i];
+            const to = drawWaypoints[i + 1];
+            const segPoints = interpolateSegment(from, to, globe, 20);
+            if (i > 0 && points.length > 0) segPoints.shift();
+            points.push(...segPoints);
+        }
+
+        if (points.length >= 2) {
+            const geom = new THREE.BufferGeometry().setFromPoints(points);
+            const mat = new THREE.LineDashedMaterial({
+                color, transparent: true, opacity: 0.7,
+                dashSize: 1.5, gapSize: 0.8,
+            });
+            const line = new THREE.Line(geom, mat);
+            line.computeLineDistances();
+            previewGroup.add(line);
+            drawPreviewMeshes.push(line);
+        }
+
+        // Draw waypoint markers
+        drawWaypoints.forEach((wp, i) => {
+            if (i === 0) return;
+            const coords = globe.getCoords(wp.lat, wp.lng, 0.01);
+            if (!coords) return;
+            const dotGeom = new THREE.SphereGeometry(0.4, 8, 8);
+            const dotMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 });
+            const dot = new THREE.Mesh(dotGeom, dotMat);
+            dot.position.set(coords.x, coords.y, coords.z);
+            previewGroup.add(dot);
+            drawPreviewMeshes.push(dot);
+        });
+    }
+
+    function interpolateSegment(from, to, globe, steps) {
+        const points = [];
+        let dLng = to.lng - from.lng;
+        if (dLng > 180) dLng -= 360;
+        if (dLng < -180) dLng += 360;
+
+        for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            const lat = from.lat + (to.lat - from.lat) * t;
+            let lng = from.lng + dLng * t;
+            if (lng > 180) lng -= 360;
+            if (lng < -180) lng += 360;
+            const coords = globe.getCoords(lat, lng, 0.008);
+            if (coords) {
+                points.push(new THREE.Vector3(coords.x, coords.y, coords.z));
+            }
+        }
+        return points;
+    }
+
+    function clearDrawPreview() {
+        const previewGroup = GlobeEngine.getPreviewGroup();
+        drawPreviewMeshes.forEach(m => {
+            previewGroup.remove(m);
+            if (m.geometry) m.geometry.dispose();
+            if (m.material) m.material.dispose();
+        });
+        drawPreviewMeshes = [];
+    }
+
+    function finishDrawing() {
+        clearDrawPreview();
+        drawingRoute = false;
+        drawStartCity = null;
+        drawWaypoints = [];
+        updateHint();
+    }
+
+    function cancelDrawing() {
+        if (drawingRoute) Sound.cancel();
+        finishDrawing();
     }
 
     function handleDeleteClick(city, st) {
         if (!st.pendingConnection) {
             st.pendingConnection = { fromCity: city };
-            highlightCity(city, true);
+            Sound.click();
         } else {
             if (st.pendingConnection.fromCity.id !== city.id) {
                 const conn = GameState.findConnection(st.pendingConnection.fromCity, city);
-                if (conn) Connections.disconnect(conn.id);
+                if (conn) {
+                    Connections.disconnect(conn.id);
+                    Sound.remove();
+                }
             }
-            highlightCity(st.pendingConnection.fromCity, false);
             st.pendingConnection = null;
         }
     }
 
-    function highlightCity(city, on) {
-        if (city.ring) city.ring.material.opacity = on ? 0.5 : 0.0;
-    }
+    function isDrawing() { return drawingRoute; }
 
-    function updateRotation(dt) {
-        if (!isDragging) {
-            rotationVelocity.x *= 0.95;
-            rotationVelocity.y *= 0.95;
-            targetRotation.x += rotationVelocity.x * 0.1;
-            targetRotation.y += rotationVelocity.y * 0.1;
-        }
-
-        const globe = GlobeEngine.getGlobe();
-        const rx = globe.rotation.x + (targetRotation.x - globe.rotation.x) * 0.06;
-        const ry = globe.rotation.y + (targetRotation.y - globe.rotation.y) * 0.06;
-        GlobeEngine.syncRotation(rx, ry);
-    }
-
-    return { init, updateRotation, selectTool };
+    return { init, selectTool, isDrawing, handleWaypointClick };
 })();

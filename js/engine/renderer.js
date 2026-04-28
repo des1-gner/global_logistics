@@ -1,42 +1,21 @@
 /**
- * Raycasting and 3D picking utilities for clicking on city markers.
+ * Renderer utilities — simplified for globe.gl.
+ * Globe.gl handles most picking natively via onObjectClick/onGlobeClick.
+ * This module provides screen-position utilities for tooltips.
  */
 const Picker = (function () {
-    const raycaster = new THREE.Raycaster();
-    const mouse = new THREE.Vector2();
 
-    function getIntersectedCity(event, camera, markerGroup, activeCities) {
-        const rect = GlobeEngine.getRenderer().domElement.getBoundingClientRect();
-        mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-        mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
-        raycaster.setFromCamera(mouse, camera);
-
-        // Check against city marker meshes
-        const meshes = [];
-        markerGroup.children.forEach(child => {
-            if (child.userData && child.userData.cityId !== undefined) {
-                meshes.push(child);
-            }
-        });
-
-        const intersects = raycaster.intersectObjects(meshes, false);
-        if (intersects.length > 0) {
-            const cityId = intersects[0].object.userData.cityId;
-            return activeCities.find(c => c.id === cityId) || null;
-        }
-        return null;
+    /**
+     * Convert a lat/lng to screen coordinates using globe.gl's internal projection.
+     */
+    function screenPosition(lat, lng) {
+        const globe = GlobeEngine.getGlobe();
+        if (!globe) return { x: 0, y: 0 };
+        // Use globe.gl's getScreenCoords method if available
+        const coords = globe.getScreenCoords(lat, lng, 0.015);
+        if (coords) return { x: coords.x, y: coords.y };
+        return { x: 0, y: 0 };
     }
 
-    function screenPosition(worldPos, camera, renderer) {
-        const v = worldPos.clone().project(camera);
-        const w = renderer.domElement.clientWidth;
-        const h = renderer.domElement.clientHeight;
-        return {
-            x: (v.x * 0.5 + 0.5) * w,
-            y: (-v.y * 0.5 + 0.5) * h
-        };
-    }
-
-    return { getIntersectedCity, screenPosition };
+    return { screenPosition };
 })();

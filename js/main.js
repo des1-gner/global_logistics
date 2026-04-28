@@ -1,87 +1,132 @@
 /**
- * Main game loop — economy-driven, no resource limits, just money.
+ * Main game loop — multi-resource economy, maintenance, speed control, sound.
+ * Built on globe.gl — no manual THREE.js rendering needed.
  */
 (function () {
-    const container = document.getElementById('game-container');
+    const container = document.getElementById('globe-container');
     const overlay = document.getElementById('overlay');
     const gameOverOverlay = document.getElementById('game-over-overlay');
     const startBtn = document.getElementById('start-btn');
     const restartBtn = document.getElementById('restart-btn');
+    const soundToggle = document.getElementById('sound-toggle');
 
-    GlobeEngine.init(container);
+    try {
+        GlobeEngine.init(container);
+    } catch(e) {
+        console.error('Globe init failed:', e);
+    }
+    Sound.init();
     HUD.init();
-    Tooltip.init();
-    Controls.init();
+    try {
+        Tooltip.init();
+    } catch(e) {
+        console.error('Tooltip init failed:', e);
+    }
+    try {
+        Controls.init();
+    } catch(e) {
+        console.error('Controls init failed:', e);
+    }
 
-    const WEEK_DURATION = 30;
-    const WEEKLY_INCOME = 25; // passive income per week
+    const WEEK_DURATION = 30; // real seconds per game week (at normal speed)
+    let lastTime = 0;
+    let running = false;
 
-    const clock = new THREE.Clock(false);
+    // Sound toggle
+    if (soundToggle) {
+        soundToggle.addEventListener('click', () => {
+            const on = Sound.toggle();
+            soundToggle.textContent = on ? '\uD83D\uDD0A' : '\uD83D\uDD07';
+            soundToggle.classList.toggle('muted', !on);
+        });
+    }
 
     function startGame() {
-        overlay.style.display = 'none';
-        gameOverOverlay.style.display = 'none';
-        clearAllVisuals();
+        try {
+            Sound.resume();
+            Sound.gameStart();
 
-        GameState.reset();
-        const st = GameState.get();
-        st.running = true;
+            overlay.style.display = 'none';
+            gameOverOverlay.style.display = 'none';
+            clearAllVisuals();
 
-        Spawner.spawnInitialCities(4);
-        st.activeCities.forEach(city => Passengers.spawnPassenger(city));
+            GameState.reset();
+            const st = GameState.get();
+            st.running = true;
+            running = true;
 
-        HUD.update();
-        clock.start();
+            Spawner.spawnInitialCities(5);
+            st.activeCities.forEach(city => Passengers.spawnPassenger(city));
+
+            HUD.update();
+            lastTime = performance.now();
+            requestAnimationFrame(animate);
+        } catch(e) {
+            console.error('Start game failed:', e);
+        }
     }
 
     function clearAllVisuals() {
-        [GlobeEngine.getMarkerGroup(), GlobeEngine.getArcGroup(), GlobeEngine.getPassengerGroup()].forEach(group => {
-            while (group.children.length > 0) {
-                const c = group.children[0];
-                group.remove(c);
-                if (c.traverse) {
-                    c.traverse(child => {
-                        if (child.geometry) child.geometry.dispose();
-                        if (child.material) {
-                            if (child.material.map) child.material.map.dispose();
-                            child.material.dispose();
-                        }
-                    });
-                } else {
-                    if (c.geometry) c.geometry.dispose();
-                    if (c.material) {
-                        if (c.material.map) c.material.map.dispose();
-                        c.material.dispose();
-                    }
-                }
+        // Clear passenger group
+        const pg = GlobeEngine.getPassengerGroup();
+        if (pg) {
+            while (pg.children.length > 0) {
+                const c = pg.children[0];
+                pg.remove(c);
+                if (c.geometry) c.geometry.dispose();
+                if (c.material) c.material.dispose();
             }
-        });
+        }
+
+        // Clear preview group
+        const pvg = GlobeEngine.getPreviewGroup();
+        if (pvg) {
+            while (pvg.children.length > 0) {
+                const c = pvg.children[0];
+                pvg.remove(c);
+                if (c.geometry) c.geometry.dispose();
+                if (c.material) c.material.dispose();
+            }
+        }
+
+        // Clear globe.gl data layers
+        try {
+            GlobeEngine.updateCityObjects([]);
+            GlobeEngine.updateArcs([]);
+            GlobeEngine.updatePaths([]);
+            GlobeEngine.updateCityBadges([]);
+        } catch(e) {
+            console.warn('Clear visuals:', e);
+        }
     }
 
     function gameOver(reason) {
         const st = GameState.get();
         st.running = false;
         st.gameOver = true;
-        clock.stop();
+        running = false;
+        Sound.gameOver();
 
         document.getElementById('game-over-reason').textContent = reason;
-        document.getElementById('game-over-stats').innerHTML = `
-            <div class="stat">Score: <span>${st.score}</span></div>
-            <div class="stat">Passengers delivered: <span>${st.delivered}</span></div>
-            <div class="stat">Money earned: <span>$${st.money}</span></div>
-            <div class="stat">Cities active: <span>${st.activeCities.length}</span></div>
-            <div class="stat">Weeks survived: <span>${st.week}</span></div>
-        `;
+        document.getElementById('game-over-stats').innerHTML =
+            '<div class="stat">Score: <span>' + st.score + '</span></div>' +
+            '<div class="stat">Passengers delivered: <span>' + st.delivered + '</span></div>' +
+            '<div class="stat">Money: <span>' + st.resources.money + '</span></div>' +
+            '<div class="stat">Cities: <span>' + st.activeCities.length + '</span></div>' +
+            '<div class="stat">Weeks survived: <span>' + st.week + '</span></div>' +
+            '<div class="stat">Connections: <span>' + st.connections.length + '</span></div>';
         gameOverOverlay.style.display = 'flex';
     }
 
-    function animate() {
+    function animate(now) {
+        if (!running) return;
         requestAnimationFrame(animate);
 
         const st = GameState.get();
-        const dt = clock.getDelta();
-
-        Controls.updateRotation(dt);
+        const rawDt = Math.min((now - lastTime) / 1000, 0.1); // cap at 100ms
+        lastTime = now;
+        const speedMult = GameState.getSpeedMult();
+        const dt = rawDt * speedMult;
 
         if (st.running) {
             st.elapsed += dt;
@@ -90,24 +135,42 @@
             if (st.elapsed - st.lastSpawnTime > st.spawnInterval) {
                 st.lastSpawnTime = st.elapsed;
                 const newCity = Spawner.spawnNextCity();
-                if (newCity) Passengers.spawnPassenger(newCity);
-                st.spawnInterval = Math.max(4, st.spawnInterval - 0.15);
+                if (newCity) {
+                    Passengers.spawnPassenger(newCity);
+                    Sound.citySpawn();
+                }
+                st.spawnInterval = Math.max(3, st.spawnInterval - 0.12);
             }
 
-            // Spawn passengers
+            // Spawn passengers — slower as cities fill up
             if (st.elapsed - st.lastPassengerTime > st.passengerInterval) {
                 st.lastPassengerTime = st.elapsed;
-                const count = Math.min(st.activeCities.length, 1 + Math.floor(st.week / 3));
+                const count = Math.min(st.activeCities.length, 1 + Math.floor(st.week / 4));
                 const shuffled = [...st.activeCities].sort(() => Math.random() - 0.5);
-                for (let i = 0; i < count; i++) Passengers.spawnPassenger(shuffled[i]);
-                st.passengerInterval = Math.max(1.5, st.passengerInterval - 0.05);
+                for (let i = 0; i < count; i++) {
+                    const city = shuffled[i];
+                    // Spawn chance decreases as city fills: 100% at 0, 60% at 1, 35% at 2, 20% at 3, etc.
+                    const fullness = city.passengers.length / GameState.MAX_PASSENGERS_PER_CITY;
+                    const spawnChance = Math.pow(1 - fullness, 2);
+                    if (Math.random() < spawnChance) {
+                        Passengers.spawnPassenger(city);
+                    }
+                }
+                st.passengerInterval = Math.max(2.0, st.passengerInterval - 0.03);
             }
 
             // Weekly tick
             const newWeek = Math.floor(st.elapsed / WEEK_DURATION) + 1;
             if (newWeek > st.week) {
                 st.week = newWeek;
-                st.money += WEEKLY_INCOME;
+                GameState.applyWeeklyIncome();
+                Sound.weekTick();
+
+                const solvent = GameState.deductMaintenance();
+                if (!solvent) {
+                    gameOver('Ran out of resources! Too many connections to maintain.');
+                    return;
+                }
             }
 
             // Board passengers
@@ -116,33 +179,17 @@
             // Update travelers
             Passengers.updateTravelers(dt);
 
-            // Update passenger dots
-            st.activeCities.forEach(city => Spawner.updatePassengerDots(city));
+            // Update passenger badges on cities
+            Spawner.refreshCityBadges();
 
-            // Pulse overloaded cities
-            st.activeCities.forEach(city => {
-                if (!city.mesh) return;
-                city.pulsePhase += dt * 2;
-                const overflow = city.passengers.length / GameState.MAX_PASSENGERS_PER_CITY;
-                if (overflow > 0.5) {
-                    city.mesh.scale.setScalar(1 + Math.sin(city.pulsePhase * 4) * 0.15 * overflow);
-                } else {
-                    city.mesh.scale.setScalar(1);
-                }
-            });
-
-            // Game over check
+            // Game over: overflow
             const overflowed = st.activeCities.find(c => c.passengers.length > GameState.MAX_PASSENGERS_PER_CITY);
-            if (overflowed) gameOver(`${overflowed.data.name} overflowed with passengers!`);
+            if (overflowed) gameOver(overflowed.data.name + ' overflowed with passengers!');
 
             HUD.update();
         }
-
-        GlobeEngine.render();
     }
 
     startBtn.addEventListener('click', startGame);
     restartBtn.addEventListener('click', startGame);
-
-    animate();
 })();

@@ -1,201 +1,295 @@
 /**
- * Globe rendering — sphere, filled countries with random shades, borders, atmosphere.
- * Triggers Terrain grid build once topology loads.
+ * Globe engine — wrapper around globe.gl library.
+ * Right-click rotates, left-click is for game interaction.
+ * Countries colored by infrastructure (red=poor, green=good).
  */
 const GlobeEngine = (function () {
-    const GLOBE_RADIUS = 1;
-    let scene, camera, renderer, globe;
-    let landGroup, markerGroup, arcGroup, passengerGroup;
+    let globeInstance = null;
+    let container = null;
+    let countryFeatures = [];
     let worldLoaded = false;
 
-    function latLonToVec3(lat, lon, r) {
-        const phi = (90 - lat) * Math.PI / 180;
-        const theta = (lon + 180) * Math.PI / 180;
-        return new THREE.Vector3(
-            -r * Math.sin(phi) * Math.cos(theta),
-            r * Math.cos(phi),
-            r * Math.sin(phi) * Math.sin(theta)
-        );
+    let passengerGroup = null;
+    let previewGroup = null;
+
+    const OIL_COUNTRIES = [
+        'Saudi Arabia', 'Russia', 'United States of America', 'Iraq', 'Iran',
+        'United Arab Emirates', 'Kuwait', 'Nigeria', 'Venezuela', 'Libya',
+        'Norway', 'Qatar', 'Kazakhstan', 'Brazil', 'Canada', 'Angola', 'Algeria'
+    ];
+    const INDUSTRIAL_COUNTRIES = [
+        'China', 'United States of America', 'Japan', 'Germany', 'South Korea',
+        'India', 'Italy', 'France', 'United Kingdom', 'Brazil', 'Mexico',
+        'Indonesia', 'Turkey', 'Thailand', 'Taiwan', 'Poland', 'Czech Republic'
+    ];
+
+    function getCountryInfra(feature) {
+        if (typeof CITY_POOL === 'undefined') return 1;
+        const geom = feature.geometry;
+        if (!geom) return 1;
+        const polygons = geom.type === 'Polygon' ? [geom.coordinates] : (geom.type === 'MultiPolygon' ? geom.coordinates : []);
+        let totalInfra = 0, count = 0;
+        for (const city of CITY_POOL) {
+            for (const polygon of polygons) {
+                if (pointInPolygon(city.lng, city.lat, polygon[0])) {
+                    totalInfra += (city.infra || 3);
+                    count++;
+                    break;
+                }
+            }
+        }
+        // Countries with no cities default to infra 1 (poor)
+        return count > 0 ? totalInfra / count : 1;
     }
 
-    function init(container) {
-        scene = new THREE.Scene();
-        camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
-        camera.position.set(0, 0, 3.2);
+    function pointInPolygon(px, py, ring) {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const xi = ring[i][0], yi = ring[i][1];
+            const xj = ring[j][0], yj = ring[j][1];
+            if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi))
+                inside = !inside;
+        }
+        return inside;
+    }
 
-        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-        container.appendChild(renderer.domElement);
+    function infraToColor(infra) {
+        const t = Math.max(0, Math.min(1, (infra - 1) / 4));
+        const r = Math.round(t < 0.5 ? 180 : 180 - (t - 0.5) * 240);
+        const g = Math.round(t < 0.5 ? 60 + t * 200 : 160 + (t - 0.5) * 60);
+        const b = Math.round(40 + t * 20);
+        return 'rgba(' + r + ',' + g + ',' + b + ',0.75)';
+    }
 
-        scene.add(new THREE.AmbientLight(0x667799, 2.0));
-        const dir = new THREE.DirectionalLight(0xffffff, 0.8);
-        dir.position.set(5, 3, 5);
-        scene.add(dir);
-        const dir2 = new THREE.DirectionalLight(0x6688bb, 0.4);
-        dir2.position.set(-4, -2, -3);
-        scene.add(dir2);
+    function infraToSideColor(infra) {
+        const t = Math.max(0, Math.min(1, (infra - 1) / 4));
+        const r = Math.round(t < 0.5 ? 120 : 120 - (t - 0.5) * 160);
+        const g = Math.round(t < 0.5 ? 40 + t * 130 : 105 + (t - 0.5) * 40);
+        const b = Math.round(30 + t * 15);
+        return 'rgba(' + r + ',' + g + ',' + b + ',0.5)';
+    }
 
-        // Ocean
-        const globeGeom = new THREE.SphereGeometry(GLOBE_RADIUS, 80, 80);
-        globe = new THREE.Mesh(globeGeom, new THREE.MeshPhongMaterial({
-            color: 0x0b1a30, emissive: 0x050e1c, specular: 0x1a3060, shininess: 30,
-        }));
-        scene.add(globe);
+    function getCountryResources(countryName) {
+        const resources = { money: 5, steel: 1, fuel: 1 };
+        if (OIL_COUNTRIES.includes(countryName)) { resources.fuel += 4; resources.money += 3; }
+        if (INDUSTRIAL_COUNTRIES.includes(countryName)) { resources.steel += 4; resources.money += 2; }
+        return resources;
+    }
 
-        // Atmosphere
-        const atmosGeom = new THREE.SphereGeometry(GLOBE_RADIUS * 1.035, 64, 64);
-        scene.add(new THREE.Mesh(atmosGeom, new THREE.MeshBasicMaterial({
-            color: 0x4488ff, transparent: true, opacity: 0.045, side: THREE.BackSide
-        })));
+    function init(containerEl) {
+        container = containerEl;
 
-        landGroup = new THREE.Group(); scene.add(landGroup);
-        markerGroup = new THREE.Group(); scene.add(markerGroup);
-        arcGroup = new THREE.Group(); scene.add(arcGroup);
-        passengerGroup = new THREE.Group(); scene.add(passengerGroup);
+        globeInstance = Globe()(containerEl)
+            .backgroundColor('#050510')
+            .showGlobe(true)
+            .showAtmosphere(true)
+            .atmosphereColor('#2244aa')
+            .atmosphereAltitude(0.15)
+            .showGraticules(true)
+            // Countries
+            .polygonAltitude(0.006)
+            .polygonCapColor(function(feat) { return feat.__capColor || 'rgba(180,60,40,0.75)'; })
+            .polygonSideColor(function(feat) { return feat.__sideColor || 'rgba(120,40,30,0.5)'; })
+            .polygonStrokeColor(function() { return '#222'; })
+            .polygonLabel(function() { return null; })
+            // Forward polygon clicks to waypoint handler
+            .onPolygonClick(function(polygon, event, coords) {
+                // coords has { lat, lng, altitude }
+                if (Controls.isDrawing()) {
+                    Controls.handleWaypointClick(coords.lat, coords.lng);
+                }
+            })
+            // 3D city objects
+            .objectLat(function(d) { return d.lat; })
+            .objectLng(function(d) { return d.lng; })
+            .objectAltitude(0.012)
+            .objectThreeObject(function(d) { return d.__threeObject ? d.__threeObject.clone(true) : new THREE.Mesh(); })
+            .objectLabel(function() { return null; })
+            // Plane arcs
+            .arcStartLat(function(d) { return d.startLat; })
+            .arcStartLng(function(d) { return d.startLng; })
+            .arcEndLat(function(d) { return d.endLat; })
+            .arcEndLng(function(d) { return d.endLng; })
+            .arcColor(function(d) { return d.color; })
+            .arcAltitudeAutoScale(0.4)
+            .arcStroke(0.8)
+            .arcDashLength(0.4)
+            .arcDashGap(0.2)
+            .arcDashAnimateTime(2000)
+            .arcLabel(function() { return null; })
+            // Train/boat paths
+            .pathPoints(function(d) { return d.points; })
+            .pathPointLat(function(p) { return p[0]; })
+            .pathPointLng(function(p) { return p[1]; })
+            .pathPointAlt(function(p) { return p[2] || 0.006; })
+            .pathColor(function(d) { return d.color; })
+            .pathStroke(3)
+            .pathDashLength(0.3)
+            .pathDashGap(0.1)
+            .pathDashAnimateTime(3000)
+            .pathTransitionDuration(0)
+            .pathLabel(function() { return null; })
+            // Disable default transitions for snappy updates
+            .arcsTransitionDuration(0)
+            // HTML elements for passenger count badges
+            .htmlLat(function(d) { return d.lat; })
+            .htmlLng(function(d) { return d.lng; })
+            .htmlAltitude(0.03)
+            .htmlElement(function(d) {
+                var el = d.__htmlEl;
+                if (!el) {
+                    el = document.createElement('div');
+                    el.className = 'city-badge';
+                    d.__htmlEl = el;
+                }
+                var count = d.passengerCount || 0;
+                var max = d.maxPassengers || 6;
+                if (count === 0) {
+                    el.style.display = 'none';
+                    return el;
+                }
+                el.style.display = '';
+                // Color: green when low, yellow mid, red when near overflow
+                var ratio = count / max;
+                var bg = ratio > 0.8 ? '#ef4444' : ratio > 0.5 ? '#f59e0b' : '#22c55e';
+                el.style.cssText = 'background:' + bg + ';color:#fff;font-size:10px;font-weight:700;' +
+                    'padding:2px 5px;border-radius:8px;text-align:center;pointer-events:none;' +
+                    'min-width:16px;line-height:14px;box-shadow:0 0 4px rgba(0,0,0,0.5);' +
+                    'font-family:-apple-system,sans-serif;display:flex;align-items:center;gap:3px;';
+
+                // Build badge content: count + destination dots
+                var html = '<span class="badge-count">' + count + '</span>';
+                var destinations = d.destinations;
+                if (destinations && destinations.length > 0) {
+                    html += '<div class="badge-dots" style="display:flex;gap:1px;flex-wrap:wrap;max-width:40px;">';
+                    for (var i = 0; i < destinations.length; i++) {
+                        html += '<span style="background:' + destinations[i] + ';width:5px;height:5px;border-radius:1px;display:inline-block;"></span>';
+                    }
+                    html += '</div>';
+                }
+                el.innerHTML = html;
+
+                // Pulse animation when nearly full
+                if (ratio > 0.8) {
+                    el.style.animation = 'pulse-badge 0.6s infinite alternate';
+                } else {
+                    el.style.animation = '';
+                }
+                return el;
+            })
+            .htmlTransitionDuration(0);
+
+        // Set initial camera
+        globeInstance.pointOfView({ lat: 30, lng: 0, altitude: 2.5 });
+
+        // Set ocean to light blue with subtle shading
+        var globeMat = globeInstance.globeMaterial();
+        if (globeMat) {
+            globeMat.color = new THREE.Color(0x1a5276);
+            globeMat.emissive = new THREE.Color(0x0a2a3f);
+            globeMat.emissiveIntensity = 0.4;
+            globeMat.shininess = 25;
+            if (globeMat.specular) globeMat.specular = new THREE.Color(0x3a8abf);
+        }
+
+        // Swap mouse buttons: right-click to rotate, left-click for game
+        var controls = globeInstance.controls();
+        if (controls) {
+            // OrbitControls mouseButtons: LEFT=ROTATE(0), MIDDLE=DOLLY(1), RIGHT=PAN(2)
+            // We want: LEFT=nothing, RIGHT=ROTATE
+            controls.mouseButtons = { LEFT: undefined, MIDDLE: 1, RIGHT: 0 };
+            controls.enablePan = false;
+        }
+
+        // Custom THREE groups
+        const scene = globeInstance.scene();
+        passengerGroup = new THREE.Group();
+        scene.add(passengerGroup);
+        previewGroup = new THREE.Group();
+        scene.add(previewGroup);
 
         // Stars
         const starsGeom = new THREE.BufferGeometry();
         const sp = [];
-        for (let i = 0; i < 3000; i++) sp.push((Math.random()-0.5)*140,(Math.random()-0.5)*140,(Math.random()-0.5)*140);
+        for (let i = 0; i < 4000; i++)
+            sp.push((Math.random()-0.5)*800,(Math.random()-0.5)*800,(Math.random()-0.5)*800);
         starsGeom.setAttribute('position', new THREE.Float32BufferAttribute(sp, 3));
-        scene.add(new THREE.Points(starsGeom, new THREE.PointsMaterial({ color: 0xffffff, size: 0.05, transparent: true, opacity: 0.45 })));
+        scene.add(new THREE.Points(starsGeom, new THREE.PointsMaterial({
+            color: 0xccddff, size: 0.3, transparent: true, opacity: 0.35
+        })));
 
-        loadLandData();
-
-        window.addEventListener('resize', () => {
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(window.innerWidth, window.innerHeight);
-        });
-
-        return { scene, camera, renderer };
+        loadCountryData();
+        return globeInstance;
     }
 
-    function triangulateSpherePolygon(ring, radius) {
-        if (ring.length < 4) return null;
-        const vertices = [], indices = [];
-        const n = ring.length - 1;
-        for (let i = 0; i < n; i++) {
-            const [lon, lat] = ring[i];
-            const v = latLonToVec3(lat, lon, radius);
-            vertices.push(v.x, v.y, v.z);
-        }
-        for (let i = 1; i < n - 1; i++) indices.push(0, i, i + 1);
-        if (vertices.length < 9 || indices.length < 3) return null;
-        return { vertices: new Float32Array(vertices), indices };
-    }
-
-    /** Generate a random earthy green/brown shade for a country */
-    function randomCountryColor(seed) {
-        // Seeded pseudo-random from country id
-        let h = seed;
-        h = ((h >> 16) ^ h) * 0x45d9f3b;
-        h = ((h >> 16) ^ h) * 0x45d9f3b;
-        h = (h >> 16) ^ h;
-        const r = (h & 0xFF) / 255;
-
-        // Green-brown palette: hue 80-160, low saturation, low lightness
-        const hue = 80 + r * 80;           // 80-160 (green to teal)
-        const sat = 0.2 + (r * 0.3);       // 20-50%
-        const lit = 0.10 + (r * 0.12);     // 10-22%
-        return new THREE.Color().setHSL(hue / 360, sat, lit);
-    }
-
-    function loadLandData() {
-        fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json')
-            .then(r => r.json())
-            .then(topology => {
-                const landR = GLOBE_RADIUS * 1.0008;
-                const borderR = GLOBE_RADIUS * 1.0012;
-
-                // Build terrain grid
-                Terrain.buildFromTopology(topology);
-
-                // ── Fill each country with a unique shade ──
-                if (topology.objects.countries) {
-                    const countries = topojson.feature(topology, topology.objects.countries);
-                    countries.features.forEach((feature, idx) => {
-                        const geom = feature.geometry;
-                        if (!geom) return;
-                        const countryId = feature.id || idx;
-                        const color = randomCountryColor(countryId * 7 + 13);
-                        const mat = new THREE.MeshPhongMaterial({
-                            color, emissive: color.clone().multiplyScalar(0.4),
-                            specular: 0x1a2a1a, shininess: 8, side: THREE.DoubleSide,
-                        });
-
-                        const polygons = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
-                        polygons.forEach(polygon => {
-                            const tri = triangulateSpherePolygon(polygon[0], landR);
-                            if (!tri) return;
-                            const meshGeom = new THREE.BufferGeometry();
-                            meshGeom.setAttribute('position', new THREE.BufferAttribute(tri.vertices, 3));
-                            meshGeom.setIndex(tri.indices);
-                            meshGeom.computeVertexNormals();
-                            landGroup.add(new THREE.Mesh(meshGeom, mat));
-                        });
-
-                        // Country borders
-                        const borderMat = new THREE.LineBasicMaterial({ color: 0x3a6a4a, transparent: true, opacity: 0.4 });
-                        polygons.forEach(polygon => {
-                            polygon.forEach(ring => {
-                                const points = ring.map(([lon, lat]) => latLonToVec3(lat, lon, borderR));
-                                landGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), borderMat));
-                            });
-                        });
-                    });
-                }
-
-                // Coastlines (brighter)
-                const land = topojson.feature(topology, topology.objects.land);
-                const coastMat = new THREE.LineBasicMaterial({ color: 0x4a8a5a, transparent: true, opacity: 0.6 });
-                land.features.forEach(feature => {
-                    const geom = feature.geometry;
-                    const polygons = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
-                    polygons.forEach(polygon => {
-                        polygon.forEach(ring => {
-                            const points = ring.map(([lon, lat]) => latLonToVec3(lat, lon, borderR * 1.0003));
-                            landGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), coastMat));
-                        });
-                    });
+    function loadCountryData() {
+        fetch('https://raw.githubusercontent.com/vasturiano/globe.gl/master/example/datasets/ne_110m_admin_0_countries.geojson')
+            .then(function(r) { return r.json(); })
+            .then(function(geojson) {
+                countryFeatures = geojson.features.map(function(feat) {
+                    const infra = getCountryInfra(feat);
+                    feat.__capColor = infraToColor(infra);
+                    feat.__sideColor = infraToSideColor(infra);
+                    feat.__infra = infra;
+                    feat.__resources = getCountryResources(feat.properties.ADMIN || feat.properties.NAME || '');
+                    return feat;
                 });
-
-                // Graticule
-                const gratMat = new THREE.LineBasicMaterial({ color: 0x182838, transparent: true, opacity: 0.1 });
-                for (let lat = -60; lat <= 60; lat += 30) {
-                    const pts = [];
-                    for (let lon = -180; lon <= 180; lon += 3) pts.push(latLonToVec3(lat, lon, GLOBE_RADIUS * 1.0015));
-                    landGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), gratMat));
-                }
-
+                globeInstance.polygonsData(countryFeatures.filter(function(d) {
+                    return d.properties.ISO_A2 !== 'AQ'; // skip Antarctica
+                }));
                 worldLoaded = true;
-                const loadEl = document.getElementById('loading');
+                var loadEl = document.getElementById('loading');
                 if (loadEl) loadEl.style.display = 'none';
             })
-            .catch(err => {
-                console.error('Land data load failed:', err);
-                const loadEl = document.getElementById('loading');
-                if (loadEl) { loadEl.textContent = 'Map failed — game still works!'; setTimeout(() => loadEl.style.display = 'none', 2000); }
+            .catch(function(err) {
+                console.error('Country data load failed:', err);
                 worldLoaded = true;
+                var loadEl = document.getElementById('loading');
+                if (loadEl) { loadEl.textContent = 'Map failed'; setTimeout(function() { loadEl.style.display = 'none'; }, 2000); }
             });
+
+        // Terrain grid
+        fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json')
+            .then(function(r) { return r.json(); })
+            .then(function(topology) { Terrain.buildFromTopology(topology); })
+            .catch(function(err) { console.warn('Terrain load failed:', err); });
     }
 
-    function syncRotation(rx, ry) {
-        globe.rotation.x = rx; globe.rotation.y = ry;
-        landGroup.rotation.x = rx; landGroup.rotation.y = ry;
-        markerGroup.rotation.x = rx; markerGroup.rotation.y = ry;
-        arcGroup.rotation.x = rx; arcGroup.rotation.y = ry;
-        passengerGroup.rotation.x = rx; passengerGroup.rotation.y = ry;
+    function getCountryResourcesForCity(lat, lng) {
+        if (!countryFeatures.length) return { money: 5, steel: 1, fuel: 1 };
+        for (var i = 0; i < countryFeatures.length; i++) {
+            var feat = countryFeatures[i];
+            var geom = feat.geometry;
+            if (!geom) continue;
+            var polygons = geom.type === 'Polygon' ? [geom.coordinates] : (geom.type === 'MultiPolygon' ? geom.coordinates : []);
+            for (var j = 0; j < polygons.length; j++) {
+                if (pointInPolygon(lng, lat, polygons[j][0])) {
+                    return feat.__resources || { money: 5, steel: 1, fuel: 1 };
+                }
+            }
+        }
+        return { money: 5, steel: 1, fuel: 1 };
     }
 
-    function render() { renderer.render(scene, camera); }
+    function updateCityObjects(data) { if (globeInstance) globeInstance.objectsData(data); }
+    function updateArcs(data) { if (globeInstance) globeInstance.arcsData(data); }
+    function updatePaths(data) { if (globeInstance) globeInstance.pathsData(data); }
+    function updateCityBadges(data) { if (globeInstance) globeInstance.htmlElementsData(data); }
 
     return {
-        init, render, syncRotation, latLonToVec3,
-        getScene: () => scene, getCamera: () => camera, getRenderer: () => renderer,
-        getGlobe: () => globe, getMarkerGroup: () => markerGroup,
-        getArcGroup: () => arcGroup, getPassengerGroup: () => passengerGroup,
-        GLOBE_RADIUS, isWorldLoaded: () => worldLoaded,
+        init: init,
+        getGlobe: function() { return globeInstance; },
+        getScene: function() { return globeInstance ? globeInstance.scene() : null; },
+        getCamera: function() { return globeInstance ? globeInstance.camera() : null; },
+        getRenderer: function() { return globeInstance ? globeInstance.renderer() : null; },
+        getPassengerGroup: function() { return passengerGroup; },
+        getPreviewGroup: function() { return previewGroup; },
+        updateCityObjects: updateCityObjects,
+        updateArcs: updateArcs,
+        updatePaths: updatePaths,
+        updateCityBadges: updateCityBadges,
+        isWorldLoaded: function() { return worldLoaded; },
+        getCountryFeatures: function() { return countryFeatures; },
+        getCountryResourcesForCity: getCountryResourcesForCity,
     };
 })();
